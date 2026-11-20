@@ -111,6 +111,61 @@ Reset!
 214.957989ms
 ```
 
+#### Persistent, generation-fenced backoff
+
+A plain `Backoff` loses its attempt counter when the process restarts, so a
+Kubernetes replacement replica starts the exponential curve over and hammers
+the failing downstream again. `PersistentBackoff` keeps the same
+`ForAttempt`/`Max`/`Jitter` semantics but stores the attempt count, next
+attempt time, cumulative duration and a random-source generation in a
+serializable `State` behind a compare-and-swap `Store`.
+
+```go
+store := backoff.MemoryStore{} // or any Store backed by etcd, SQL, ...
+pb := &backoff.PersistentBackoff{
+    Backoff: &backoff.Backoff{Max: 5 * time.Minute},
+    Store:   &store,
+}
+
+// On startup: load and clock-calibrate the persisted state. Each recovery
+// opens a new random generation, fencing off zombie replicas.
+if err := pb.Recover(ctx); err != nil {
+    log.Fatal(err)
+}
+
+for {
+    if d, err := pb.Delay(); err != nil {
+        log.Fatal(err)
+    } else if d > 0 {
+        time.Sleep(d) // an already-elapsed wait returns zero immediately
+    }
+
+    if err := doWork(); err != nil {
+        // Computes the next duration exactly like Backoff.Duration(), then
+        // commits it; an old generation or attempt rollback is rejected.
+        if _, err := pb.Advance(ctx); err != nil {
+            log.Fatal(err)
+        }
+        continue
+    }
+    break
+}
+```
+
+Guarantees:
+
+- `State` round-trips through `MarshalState`/`UnmarshalState` (JSON); corrupt
+  or zero-value payloads fail with `ErrCorruptState`/`ErrZeroValue` without
+  disturbing the caller's current valid state.
+- `Recover` calibrates against the external clock: expired waits resume at
+  once, future waits remain capped at the effective `Max`.
+- Commits are fenced. An older random generation fails with
+  `ErrStaleGeneration`; a smaller attempt count within a generation fails
+  with `ErrAttemptRollback`; a lost compare-and-swap fails with
+  `ErrConflict`.
+- Concurrent `Recover`/`Advance`/`State` calls fail fast with
+  `ErrConcurrentAccess` rather than returning a torn state.
+
 #### Documentation
 
 https://godoc.org/github.com/jpillora/backoff

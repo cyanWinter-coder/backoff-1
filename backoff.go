@@ -55,16 +55,30 @@ const maxInt64 = float64(math.MaxInt64 - 512)
 //
 // ForAttempt is concurrent-safe.
 func (b *Backoff) ForAttempt(attempt float64) time.Duration {
+	return b.forAttempt(attempt, rand.Float64)
+}
+
+// bounds applies the zero-value defaults and returns the effective minimum
+// and maximum durations.
+func (b *Backoff) bounds() (min, max time.Duration) {
 	// Zero-values are nonsensical, so we use
 	// them to apply defaults
-	min := b.Min
+	min = b.Min
 	if min <= 0 {
 		min = 100 * time.Millisecond
 	}
-	max := b.Max
+	max = b.Max
 	if max <= 0 {
 		max = 10 * time.Second
 	}
+	return min, max
+}
+
+// forAttempt computes the duration for a specific attempt, drawing jitter
+// randomness from rng when Jitter is enabled. Passing rand.Float64 makes it
+// behave exactly like ForAttempt.
+func (b *Backoff) forAttempt(attempt float64, rng func() float64) time.Duration {
+	min, max := b.bounds()
 	if min >= max {
 		// short-circuit
 		return max
@@ -77,7 +91,7 @@ func (b *Backoff) ForAttempt(attempt float64) time.Duration {
 	minf := float64(min)
 	durf := minf * math.Pow(factor, attempt)
 	if b.Jitter {
-		durf = rand.Float64()*(durf-minf) + minf
+		durf = rng()*(durf-minf) + minf
 	}
 	//ensure float64 wont overflow int64
 	if durf > maxInt64 {
